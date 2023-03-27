@@ -1,4 +1,6 @@
 #[macro_use] extern crate rocket;
+#[macro_use] extern crate dotenv_codegen;
+extern crate dotenv;
 use rocket_db_pools::{Database, Connection};
 use rocket_db_pools::sqlx;
 use rocket::serde::{Deserialize, Serialize, json::Json};
@@ -10,8 +12,10 @@ use rocket::fs::TempFile;
 use std::io::Cursor;
 use image::io::Reader as ImageReader;
 use rocket::http::Header;
-use rocket::{Request, Response};
+use rocket::{Request, Response, State};
 use rocket::fairing::{Fairing, Info, Kind};
+use dotenv::dotenv;
+
 
 
 #[derive(Database)]
@@ -143,6 +147,23 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
 }
 
 
+#[get("/")]
+async fn get_recent_songs(state: &State<LastFMAPI>) -> String {
+    // let secret = state.secret;
+    let url = format!(
+        "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=I4ROVI&api_key={}&format=json",
+        &state.key
+    );
+
+    if let Ok(req) = reqwest::get(url).await {
+        if let Ok(text) = req.text().await {
+            return text;
+        }
+    }
+
+    String::default()
+}
+
 
 pub struct CORS;
 
@@ -169,11 +190,23 @@ fn all_options() {
 }
 
 
+struct LastFMAPI {
+    key: String,
+    secret: String
+}
+
+
 #[launch]
 fn rocket() -> _ {
+    dotenv().expect("Couldn't load .env");
+
     rocket::build()
         .attach(DB::init())
         .attach(CORS)
+        .manage(LastFMAPI {
+            key: dotenv!("LAST_FM_API_KEY").to_string(),
+            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string()
+        })
         .mount("/", routes![all_options])
         .mount("/notes", routes![
             get_all_notes,
@@ -185,5 +218,8 @@ fn rocket() -> _ {
         .mount("/paint", routes![
             get_paint,
             update_paint,
+        ])
+        .mount("/lastfm", routes![
+            get_recent_songs
         ])
 }
