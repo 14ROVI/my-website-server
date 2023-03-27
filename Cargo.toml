@@ -1,0 +1,21 @@
+[package]
+name = "my-website-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rocket = { version = "0.5.0-rc.2", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+proc-macro2 = "= 1.0.51"
+image = "0.24.5"
+
+[dependencies.sqlx]
+version = "0.5"
+default-features = false
+features = ["macros"]
+
+[dependencies.rocket_db_pools]
+version = "0.1.0-rc.2"
+features = ["sqlx_sqlite"]
