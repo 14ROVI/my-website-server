@@ -1,9 +1,11 @@
 #[macro_use] extern crate rocket;
 #[macro_use] extern crate dotenv_codegen;
 extern crate dotenv;
+use rocket::futures::lock::Mutex;
 use rocket_db_pools::{Database, Connection};
 use rocket_db_pools::sqlx;
 use rocket::serde::{Deserialize, Serialize, json::Json};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rocket::fs::NamedFile;
 use std::path::Path;
@@ -148,8 +150,17 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
 
 
 #[get("/")]
-async fn get_recent_songs(state: &State<LastFMAPI>) -> String {
-    // let secret = state.secret;
+async fn get_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>) -> String {
+    let mut state = state.lock().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    if now - state.last_hit < 5 {
+        return state.last_response.clone();
+    }
+
     let url = format!(
         "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=I4ROVI&api_key={}&format=json",
         &state.key
@@ -157,6 +168,8 @@ async fn get_recent_songs(state: &State<LastFMAPI>) -> String {
 
     if let Ok(req) = reqwest::get(url).await {
         if let Ok(text) = req.text().await {
+            state.last_response = text.clone();
+            state.last_hit = now;
             return text;
         }
     }
@@ -192,7 +205,9 @@ fn all_options() {
 
 struct LastFMAPI {
     key: String,
-    secret: String
+    secret: String,
+    last_hit: u64,
+    last_response: String,
 }
 
 
@@ -203,10 +218,12 @@ fn rocket() -> _ {
     rocket::build()
         .attach(DB::init())
         .attach(CORS)
-        .manage(LastFMAPI {
+        .manage(Arc::new(Mutex::new(LastFMAPI {
             key: dotenv!("LAST_FM_API_KEY").to_string(),
-            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string()
-        })
+            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string(),
+            last_hit: 0,
+            last_response: String::default()
+        })))
         .mount("/", routes![all_options])
         .mount("/notes", routes![
             get_all_notes,
