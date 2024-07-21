@@ -5,12 +5,14 @@ extern crate dotenv_codegen;
 extern crate dotenv;
 use dotenv::dotenv;
 use image::io::Reader as ImageReader;
+use image::EncodableLayout;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::fs::NamedFile;
 use rocket::fs::TempFile;
 use rocket::futures::lock::Mutex;
 use rocket::http::Header;
 use rocket::http::Status;
+use rocket::response::status;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::{Request, Response, State};
 use rocket_db_pools::sqlx;
@@ -46,7 +48,7 @@ async fn get_all_notes(mut db: Connection<DB>) -> Json<Vec<StickyNote>> {
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes"
     )
-    .fetch_all(&mut *db)
+    .fetch_all(&mut **db)
     .await
     .map_or_else(|_| Json(Vec::new()), Json)
 }
@@ -58,30 +60,40 @@ async fn get_note(mut db: Connection<DB>, id: u32) -> Option<Json<StickyNote>> {
         "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
         id
     )
-    .fetch_one(&mut *db)
+    .fetch_one(&mut **db)
     .await
     .ok()
     .map(Json)
 }
 
 #[post("/?<content>&<x>&<y>")]
-async fn create_note(mut db: Connection<DB>, content: &str, x: u32, y: u32) -> Status {
+async fn create_note(
+    mut db: Connection<DB>,
+    content: &str,
+    x: u32,
+    y: u32,
+) -> Result<Json<StickyNote>, status::Custom<&'static str>> {
     let sys_time = get_sys_time();
 
     if let Some(sys_time) = sys_time {
-        sqlx::query(
+        sqlx::query_as!(
+            StickyNote,
             "INSERT INTO notes (content, created_at, x, y) VALUES (?, ?, ?, ?)
-            RETURNING id, content, created_at, x, y"
+            RETURNING id, content, created_at, x, y",
+            content,
+            sys_time,
+            x,
+            y
         )
-            .bind(content)
-            .bind(sys_time)
-            .bind(x)
-            .bind(y)
-            .execute(&mut *db)
-            .await
-            .map_or_else(|_| Status::InternalServerError, Json)
+        .fetch_one(&mut **db)
+        .await
+        .map(Json)
+        .map_err(|_| status::Custom(Status::InternalServerError, "error saving sticky note"))
     } else {
-        Status::InternalServerError
+        Err(status::Custom(
+            Status::InternalServerError,
+            "error getting system time",
+        ))
     }
 }
 
@@ -92,7 +104,7 @@ async fn update_note(mut db: Connection<DB>, id: u32, content: &str, x: u32, y: 
         .bind(x)
         .bind(y)
         .bind(id)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
@@ -101,7 +113,7 @@ async fn update_note(mut db: Connection<DB>, id: u32, content: &str, x: u32, y: 
 async fn delete_note(mut db: Connection<DB>, id: u32) -> Status {
     sqlx::query("DELETE FROM notes WHERE id = ?")
         .bind(id)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
