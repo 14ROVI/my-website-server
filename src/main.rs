@@ -1,27 +1,28 @@
-#[macro_use] extern crate rocket;
-#[macro_use] extern crate dotenv_codegen;
+#[macro_use]
+extern crate rocket;
+#[macro_use]
+extern crate dotenv_codegen;
 extern crate dotenv;
-use rocket_db_pools::{Database, Connection};
-use rocket_db_pools::sqlx;
-use rocket::serde::{Deserialize, Serialize, json::Json};
-use std::time::{SystemTime, UNIX_EPOCH};
-use rocket::fs::NamedFile;
-use std::path::Path;
-use rocket::http::Status;
-use rocket::fs::TempFile;
-use std::io::Cursor;
-use image::io::Reader as ImageReader;
-use rocket::http::Header;
-use rocket::{Request, Response, State};
-use rocket::fairing::{Fairing, Info, Kind};
 use dotenv::dotenv;
-
-
+use image::io::Reader as ImageReader;
+use rocket::fairing::{Fairing, Info, Kind};
+use rocket::fs::NamedFile;
+use rocket::fs::TempFile;
+use rocket::futures::lock::Mutex;
+use rocket::http::Header;
+use rocket::http::Status;
+use rocket::serde::{json::Json, Deserialize, Serialize};
+use rocket::{Request, Response, State};
+use rocket_db_pools::sqlx;
+use rocket_db_pools::{Connection, Database};
+use std::io::Cursor;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Database)]
 #[database("db")]
 struct DB(sqlx::SqlitePool);
-
 
 #[derive(Deserialize, Serialize)]
 struct StickyNote {
@@ -29,9 +30,8 @@ struct StickyNote {
     content: String,
     created_at: i64,
     x: i64,
-    y: i64
+    y: i64,
 }
-
 
 fn get_sys_time() -> Option<u32> {
     SystemTime::now()
@@ -42,22 +42,26 @@ fn get_sys_time() -> Option<u32> {
 
 #[get("/")]
 async fn get_all_notes(mut db: Connection<DB>) -> Json<Vec<StickyNote>> {
-    sqlx::query_as!(StickyNote, "SELECT id, content, created_at, x, y FROM notes")
-        .fetch_all(&mut *db)
-        .await
-        .map_or_else(
-            |_| Json(Vec::new()), 
-            Json
-        )
+    sqlx::query_as!(
+        StickyNote,
+        "SELECT id, content, created_at, x, y FROM notes"
+    )
+    .fetch_all(&mut *db)
+    .await
+    .map_or_else(|_| Json(Vec::new()), Json)
 }
 
 #[get("/<id>")]
 async fn get_note(mut db: Connection<DB>, id: u32) -> Option<Json<StickyNote>> {
-    sqlx::query_as!(StickyNote, "SELECT id, content, created_at, x, y FROM notes WHERE id = ?", id)
-        .fetch_one(&mut *db)
-        .await
-        .ok()
-        .map(Json)
+    sqlx::query_as!(
+        StickyNote,
+        "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
+        id
+    )
+    .fetch_one(&mut *db)
+    .await
+    .ok()
+    .map(Json)
 }
 
 #[post("/?<content>&<x>&<y>")]
@@ -65,17 +69,17 @@ async fn create_note(mut db: Connection<DB>, content: &str, x: u32, y: u32) -> S
     let sys_time = get_sys_time();
 
     if let Some(sys_time) = sys_time {
-        sqlx::query("INSERT INTO notes (content, created_at, x, y) VALUES (?, ?, ?, ?)")
-        .bind(content)
-        .bind(sys_time)
-        .bind(x)
-        .bind(y)
-        .execute(&mut *db)
-        .await
-        .map_or_else(
-            |_| Status::InternalServerError, 
-            |_| Status::Created
+        sqlx::query(
+            "INSERT INTO notes (content, created_at, x, y) VALUES (?, ?, ?, ?)
+            RETURNING id, content, created_at, x, y"
         )
+            .bind(content)
+            .bind(sys_time)
+            .bind(x)
+            .bind(y)
+            .execute(&mut *db)
+            .await
+            .map_or_else(|_| Status::InternalServerError, Json)
     } else {
         Status::InternalServerError
     }
@@ -90,10 +94,7 @@ async fn update_note(mut db: Connection<DB>, id: u32, content: &str, x: u32, y: 
         .bind(id)
         .execute(&mut *db)
         .await
-        .map_or_else(
-            |_| Status::InternalServerError, 
-            |_| Status::Ok
-        )
+        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
 
 #[delete("/<id>")]
@@ -102,12 +103,8 @@ async fn delete_note(mut db: Connection<DB>, id: u32) -> Status {
         .bind(id)
         .execute(&mut *db)
         .await
-        .map_or_else(
-            |_| Status::InternalServerError, 
-            |_| Status::Ok
-        )
+        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
-
 
 #[get("/")]
 async fn get_paint() -> Option<NamedFile> {
@@ -117,27 +114,20 @@ async fn get_paint() -> Option<NamedFile> {
 #[patch("/", data = "<upload>")]
 async fn update_paint(upload: TempFile<'_>) -> Status {
     let img = match upload {
-        TempFile::File { .. } => {
-            ImageReader::open(upload.path().unwrap())
-                .ok()
-                .and_then(|i| i.with_guessed_format().ok())
-                .and_then(|i| i.decode().ok())
-        }
-        TempFile::Buffered { content } => {
-            ImageReader::new(Cursor::new(content.as_bytes()))
-                .with_guessed_format()
-                .ok()
-                .and_then(|i| i.decode().ok())
-        }
+        TempFile::File { .. } => ImageReader::open(upload.path().unwrap())
+            .ok()
+            .and_then(|i| i.with_guessed_format().ok())
+            .and_then(|i| i.decode().ok()),
+        TempFile::Buffered { content } => ImageReader::new(Cursor::new(content.as_bytes()))
+            .with_guessed_format()
+            .ok()
+            .and_then(|i| i.decode().ok()),
     };
 
     if let Some(img) = img {
         if img.height() == 1080 && img.width() == 1920 {
             img.save_with_format("paint.png", image::ImageFormat::Png)
-                .map_or_else(
-                    |_| Status::InternalServerError, 
-                    |_| Status::Created
-                )
+                .map_or_else(|_| Status::InternalServerError, |_| Status::Created)
         } else {
             Status::BadRequest
         }
@@ -146,10 +136,18 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
     }
 }
 
-
 #[get("/")]
-async fn get_recent_songs(state: &State<LastFMAPI>) -> String {
-    // let secret = state.secret;
+async fn get_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>) -> String {
+    let mut state = state.lock().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    if now - state.last_hit < 5 {
+        return state.last_response.clone();
+    }
+
     let url = format!(
         "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=I4ROVI&api_key={}&format=json",
         &state.key
@@ -157,13 +155,14 @@ async fn get_recent_songs(state: &State<LastFMAPI>) -> String {
 
     if let Ok(req) = reqwest::get(url).await {
         if let Ok(text) = req.text().await {
+            state.last_response = text.clone();
+            state.last_hit = now;
             return text;
         }
     }
 
     String::default()
 }
-
 
 pub struct CORS;
 
@@ -172,13 +171,16 @@ impl Fairing for CORS {
     fn info(&self) -> Info {
         Info {
             name: "Add CORS headers to responses",
-            kind: Kind::Response
+            kind: Kind::Response,
         }
     }
 
     async fn on_response<'r>(&self, _request: &'r Request<'_>, response: &mut Response<'r>) {
         response.set_header(Header::new("Access-Control-Allow-Origin", "*"));
-        response.set_header(Header::new("Access-Control-Allow-Methods", "POST, GET, PATCH, DELETE, OPTIONS"));
+        response.set_header(Header::new(
+            "Access-Control-Allow-Methods",
+            "POST, GET, PATCH, DELETE, OPTIONS",
+        ));
         response.set_header(Header::new("Access-Control-Allow-Headers", "*"));
         response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
     }
@@ -189,12 +191,12 @@ fn all_options() {
     /* Intentionally left empty */
 }
 
-
 struct LastFMAPI {
     key: String,
-    secret: String
+    secret: String,
+    last_hit: u64,
+    last_response: String,
 }
-
 
 #[launch]
 fn rocket() -> _ {
@@ -203,23 +205,23 @@ fn rocket() -> _ {
     rocket::build()
         .attach(DB::init())
         .attach(CORS)
-        .manage(LastFMAPI {
+        .manage(Arc::new(Mutex::new(LastFMAPI {
             key: dotenv!("LAST_FM_API_KEY").to_string(),
-            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string()
-        })
+            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string(),
+            last_hit: 0,
+            last_response: String::default(),
+        })))
         .mount("/", routes![all_options])
-        .mount("/notes", routes![
-            get_all_notes,
-            get_note,
-            create_note,
-            update_note,
-            delete_note
-        ])
-        .mount("/paint", routes![
-            get_paint,
-            update_paint,
-        ])
-        .mount("/lastfm", routes![
-            get_recent_songs
-        ])
+        .mount(
+            "/notes",
+            routes![
+                get_all_notes,
+                get_note,
+                create_note,
+                update_note,
+                delete_note
+            ],
+        )
+        .mount("/paint", routes![get_paint, update_paint,])
+        .mount("/lastfm", routes![get_recent_songs])
 }
