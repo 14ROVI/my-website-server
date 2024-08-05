@@ -12,11 +12,12 @@ use rocket::fs::TempFile;
 use rocket::futures::lock::Mutex;
 use rocket::http::Header;
 use rocket::http::Status;
-use rocket::response::status;
+use rocket::response::{status, Redirect};
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::{Request, Response, State};
 use rocket_db_pools::sqlx;
 use rocket_db_pools::{Connection, Database};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -149,26 +150,40 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
 }
 
 #[get("/")]
-async fn get_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>) -> String {
+async fn get_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>) -> Redirect {
+    Redirect::to(uri!("./I4ROVI"))
+}
+
+#[get("/<username>")]
+async fn get_users_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>, username: &str) -> String {
     let mut state = state.lock().await;
+    let last_hit = state.user_cache.get(username);
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs();
 
-    if now - state.last_hit < 5 {
-        return state.last_response.clone();
+    if let Some(last_hit) = last_hit {
+        if now - last_hit.hit_at < 5 {
+            return last_hit.data.clone();
+        }
     }
 
     let url = format!(
-        "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=I4ROVI&api_key={}&format=json",
-        &state.key
+        "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user={}&api_key={}&format=json",
+        username, &state.key
     );
 
     if let Ok(req) = reqwest::get(url).await {
         if let Ok(text) = req.text().await {
-            state.last_response = text.clone();
-            state.last_hit = now;
+            state.user_cache.insert(
+                username.to_owned(),
+                LastFmApiHit {
+                    hit_at: now,
+                    data: text.clone(),
+                },
+            );
             return text;
         }
     }
@@ -203,11 +218,15 @@ fn all_options() {
     /* Intentionally left empty */
 }
 
+struct LastFmApiHit {
+    hit_at: u64,
+    data: String,
+}
+
 struct LastFMAPI {
     key: String,
     secret: String,
-    last_hit: u64,
-    last_response: String,
+    user_cache: HashMap<String, LastFmApiHit>,
 }
 
 #[launch]
@@ -220,8 +239,7 @@ fn rocket() -> _ {
         .manage(Arc::new(Mutex::new(LastFMAPI {
             key: dotenv!("LAST_FM_API_KEY").to_string(),
             secret: dotenv!("LAST_FM_SHARED_SECRET").to_string(),
-            last_hit: 0,
-            last_response: String::default(),
+            user_cache: HashMap::default(),
         })))
         .mount("/", routes![all_options])
         .mount(
@@ -235,5 +253,5 @@ fn rocket() -> _ {
             ],
         )
         .mount("/paint", routes![get_paint, update_paint,])
-        .mount("/lastfm", routes![get_recent_songs])
+        .mount("/lastfm", routes![get_recent_songs, get_users_recent_songs])
 }
