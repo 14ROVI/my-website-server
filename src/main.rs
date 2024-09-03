@@ -150,7 +150,7 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
 }
 
 #[get("/")]
-async fn get_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>) -> Redirect {
+async fn get_recent_songs() -> Redirect {
     Redirect::to(uri!("./I4ROVI"))
 }
 
@@ -252,6 +252,6 @@ fn rocket() -> _ {
                 delete_note
             ],
         )
-        .mount("/paint", routes![get_paint, update_paint,])
+        .mount("/paint", routes![get_paint, update_paint])
         .mount("/lastfm", routes![get_recent_songs, get_users_recent_songs])
 }
