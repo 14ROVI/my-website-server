@@ -3,18 +3,14 @@ name = "my-website-server"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-dotenv = "0.15.0"
-dotenv_codegen = "0.15.0"
 rocket = { version = "0.5.1", features = ["json"] }
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-proc-macro2 = "1.0.86"
-image = "0.24.5"
+image = "0.25.2"
 sqlx = { version = "0.7", features = [ "sqlite", "runtime-tokio-native-tls", "macros" ] }
+tokio = { version = "1.40.0", features = [] }
+dotenvy = "0.15.7"
 
 [dependencies.rocket_db_pools]
 version = "0.2.0"

@@ -1,10 +1,7 @@
 #[macro_use]
 extern crate rocket;
-#[macro_use]
-extern crate dotenv_codegen;
-extern crate dotenv;
-use dotenv::dotenv;
-use image::io::Reader as ImageReader;
+use dotenvy::dotenv;
+use image::ImageReader;
 use image::EncodableLayout;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::fs::NamedFile;
@@ -18,6 +15,7 @@ use rocket::{Request, Response, State};
 use rocket_db_pools::sqlx;
 use rocket_db_pools::{Connection, Database};
 use std::collections::HashMap;
+use std::env;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -34,6 +32,16 @@ struct StickyNote {
     created_at: i64,
     x: i64,
     y: i64,
+}
+
+struct LastFmApiHit {
+    hit_at: u64,
+    data: String,
+}
+
+struct LastFMAPI {
+    key: String,
+    user_cache: HashMap<String, LastFmApiHit>,
 }
 
 fn get_sys_time() -> Option<u32> {
@@ -218,17 +226,6 @@ fn all_options() {
     /* Intentionally left empty */
 }
 
-struct LastFmApiHit {
-    hit_at: u64,
-    data: String,
-}
-
-struct LastFMAPI {
-    key: String,
-    secret: String,
-    user_cache: HashMap<String, LastFmApiHit>,
-}
-
 #[launch]
 fn rocket() -> _ {
     dotenv().expect("Couldn't load .env");
@@ -237,8 +234,7 @@ fn rocket() -> _ {
         .attach(DB::init())
         .attach(CORS)
         .manage(Arc::new(Mutex::new(LastFMAPI {
-            key: dotenv!("LAST_FM_API_KEY").to_string(),
-            secret: dotenv!("LAST_FM_SHARED_SECRET").to_string(),
+            key: env::var("LAST_FM_API_KEY").expect("Can't find LAST_FM_API_KEY").to_string(),
             user_cache: HashMap::default(),
         })))
         .mount("/", routes![all_options])
