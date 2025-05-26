@@ -1,5 +1,2 @@
-[default.databases.db]
-url = "db.sqlite"
-
 [default]
 port = 2323

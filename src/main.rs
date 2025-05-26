@@ -1,29 +1,33 @@
-#[macro_use]
-extern crate rocket;
 use dotenvy::dotenv;
-use image::ImageReader;
-use image::EncodableLayout;
-use rocket::fairing::{Fairing, Info, Kind};
-use rocket::fs::NamedFile;
-use rocket::fs::TempFile;
-use rocket::futures::lock::Mutex;
-use rocket::http::Header;
-use rocket::http::Status;
-use rocket::response::{status, Redirect};
-use rocket::serde::{json::Json, Deserialize, Serialize};
-use rocket::{Request, Response, State};
-use rocket_db_pools::sqlx;
-use rocket_db_pools::{Connection, Database};
-use std::collections::HashMap;
-use std::env;
-use std::io::Cursor;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Database)]
-#[database("db")]
-struct DB(sqlx::SqlitePool);
+use image::{EncodableLayout, ImageReader};
+
+use rocket::{
+    delete,
+    fairing::{Fairing, Info, Kind},
+    fs::{NamedFile, TempFile},
+    futures::lock::Mutex,
+    get,
+    http::{Header, Status},
+    launch, options, patch, post,
+    response::{status, Redirect},
+    routes,
+    serde::{json::Json, Deserialize, Serialize},
+    uri, Build, Request, Response, Rocket, State,
+};
+
+use sqlx::{Pool, Sqlite, SqlitePool};
+
+use std::{
+    collections::HashMap,
+    env,
+    io::Cursor,
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+type DbPool = State<Arc<Pool<Sqlite>>>;
 
 #[derive(Deserialize, Serialize)]
 struct StickyNote {
@@ -52,24 +56,24 @@ fn get_sys_time() -> Option<u32> {
 }
 
 #[get("/")]
-async fn get_all_notes(mut db: Connection<DB>) -> Json<Vec<StickyNote>> {
+async fn get_all_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
     sqlx::query_as!(
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes"
     )
-    .fetch_all(&mut **db)
+    .fetch_all(&***pool)
     .await
     .map_or_else(|_| Json(Vec::new()), Json)
 }
 
 #[get("/<id>")]
-async fn get_note(mut db: Connection<DB>, id: u32) -> Option<Json<StickyNote>> {
+async fn get_note(pool: &DbPool, id: u32) -> Option<Json<StickyNote>> {
     sqlx::query_as!(
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
         id
     )
-    .fetch_one(&mut **db)
+    .fetch_one(&***pool)
     .await
     .ok()
     .map(Json)
@@ -77,7 +81,7 @@ async fn get_note(mut db: Connection<DB>, id: u32) -> Option<Json<StickyNote>> {
 
 #[post("/?<content>&<x>&<y>")]
 async fn create_note(
-    mut db: Connection<DB>,
+    pool: &DbPool,
     content: &str,
     x: u32,
     y: u32,
@@ -94,7 +98,7 @@ async fn create_note(
             x,
             y
         )
-        .fetch_one(&mut **db)
+        .fetch_one(&***pool)
         .await
         .map(Json)
         .map_err(|_| status::Custom(Status::InternalServerError, "error saving sticky note"))
@@ -107,22 +111,22 @@ async fn create_note(
 }
 
 #[patch("/<id>?<content>&<x>&<y>")]
-async fn update_note(mut db: Connection<DB>, id: u32, content: &str, x: u32, y: u32) -> Status {
+async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> Status {
     sqlx::query("UPDATE notes SET content = ?, x = ?, y = ? WHERE id = ?")
         .bind(content)
         .bind(x)
         .bind(y)
         .bind(id)
-        .execute(&mut **db)
+        .execute(&***pool)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
 
 #[delete("/<id>")]
-async fn delete_note(mut db: Connection<DB>, id: u32) -> Status {
+async fn delete_note(pool: &DbPool, id: u32) -> Status {
     sqlx::query("DELETE FROM notes WHERE id = ?")
         .bind(id)
-        .execute(&mut **db)
+        .execute(&***pool)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
@@ -227,14 +231,20 @@ fn all_options() {
 }
 
 #[launch]
-fn rocket() -> _ {
+async fn rocket() -> Rocket<Build> {
     dotenv().expect("Couldn't load .env");
 
+    let pool = SqlitePool::connect(&env::var("DATABASE_URL").expect("Can't find DATABASE_URL"))
+        .await
+        .unwrap();
+
     rocket::build()
-        .attach(DB::init())
         .attach(CORS)
+        .manage(Arc::new(pool))
         .manage(Arc::new(Mutex::new(LastFMAPI {
-            key: env::var("LAST_FM_API_KEY").expect("Can't find LAST_FM_API_KEY").to_string(),
+            key: env::var("LAST_FM_API_KEY")
+                .expect("Can't find LAST_FM_API_KEY")
+                .to_string(),
             user_cache: HashMap::default(),
         })))
         .mount("/", routes![all_options])

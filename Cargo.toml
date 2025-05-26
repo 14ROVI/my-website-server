@@ -5,13 +5,9 @@ edition = "2021"
 
 [dependencies]
 rocket = { version = "0.5.1", features = ["json"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12.15", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 image = "0.25.2"
-sqlx = { version = "0.7", features = [ "sqlite", "runtime-tokio-native-tls", "macros" ] }
-tokio = { version = "1.40.0", features = [] }
+sqlx = { version = "0.8.6", features = [ "runtime-tokio", "tls-native-tls", "sqlite", "macros" ] }
 dotenvy = "0.15.7"
-
-[dependencies.rocket_db_pools]
-version = "0.2.0"
-features = ["sqlx_sqlite"]
+tokio = "1.45.1"
