@@ -56,10 +56,21 @@ fn get_sys_time() -> Option<u32> {
 }
 
 #[get("/")]
-async fn get_all_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
+async fn get_active_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
     sqlx::query_as!(
         StickyNote,
-        "SELECT id, content, created_at, x, y FROM notes"
+        "SELECT id, content, created_at, x, y FROM notes WHERE deleted = FALSE"
+    )
+    .fetch_all(&***pool)
+    .await
+    .map_or_else(|_| Json(Vec::new()), Json)
+}
+
+#[get("/deleted")]
+async fn get_deleted_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
+    sqlx::query_as!(
+        StickyNote,
+        "SELECT id, content, created_at, x, y FROM notes WHERE deleted = TRUE"
     )
     .fetch_all(&***pool)
     .await
@@ -124,7 +135,7 @@ async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> S
 
 #[delete("/<id>")]
 async fn delete_note(pool: &DbPool, id: u32) -> Status {
-    sqlx::query("DELETE FROM notes WHERE id = ?")
+    sqlx::query("UPDATE notes SET deleted = TRUE WHERE id = ?")
         .bind(id)
         .execute(&***pool)
         .await
@@ -251,7 +262,8 @@ async fn rocket() -> Rocket<Build> {
         .mount(
             "/notes",
             routes![
-                get_all_notes,
+                get_active_notes,
+                get_deleted_notes,
                 get_note,
                 create_note,
                 update_note,
