@@ -1,5 +1,7 @@
 use dotenvy::dotenv;
 
+use itertools::Itertools;
+
 use image::{EncodableLayout, ImageReader};
 
 use rocket::{
@@ -18,6 +20,9 @@ use rocket::{
 
 use sqlx::{Pool, Sqlite, SqlitePool};
 
+use select::document::Document;
+use select::predicate::{Attr, Class, Name, Predicate};
+
 use std::{
     collections::HashMap,
     env,
@@ -27,7 +32,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-type DbPool = State<Arc<Pool<Sqlite>>>;
+type DbPool = State<Pool<Sqlite>>;
 
 #[derive(Deserialize, Serialize)]
 struct StickyNote {
@@ -38,6 +43,14 @@ struct StickyNote {
     y: i64,
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+struct FilmData {
+    name: String,
+    poster_url: String,
+    rating: u32,
+    watched_at: String,
+}
+
 struct LastFmApiHit {
     hit_at: u64,
     data: String,
@@ -46,6 +59,11 @@ struct LastFmApiHit {
 struct LastFMAPI {
     key: String,
     user_cache: HashMap<String, LastFmApiHit>,
+}
+
+struct LetterboxdScrape {
+    last_hit_at: u64,
+    last_response: Vec<FilmData>,
 }
 
 fn get_sys_time() -> Option<u32> {
@@ -61,7 +79,7 @@ async fn get_active_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE deleted = FALSE"
     )
-    .fetch_all(&***pool)
+    .fetch_all(&**pool)
     .await
     .map_or_else(|_| Json(Vec::new()), Json)
 }
@@ -72,7 +90,7 @@ async fn get_deleted_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE deleted = TRUE"
     )
-    .fetch_all(&***pool)
+    .fetch_all(&**pool)
     .await
     .map_or_else(|_| Json(Vec::new()), Json)
 }
@@ -84,7 +102,7 @@ async fn get_note(pool: &DbPool, id: u32) -> Option<Json<StickyNote>> {
         "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
         id
     )
-    .fetch_one(&***pool)
+    .fetch_one(&**pool)
     .await
     .ok()
     .map(Json)
@@ -109,7 +127,7 @@ async fn create_note(
             x,
             y
         )
-        .fetch_one(&***pool)
+        .fetch_one(&**pool)
         .await
         .map(Json)
         .map_err(|_| status::Custom(Status::InternalServerError, "error saving sticky note"))
@@ -128,7 +146,7 @@ async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> S
         .bind(x)
         .bind(y)
         .bind(id)
-        .execute(&***pool)
+        .execute(&**pool)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
@@ -137,7 +155,7 @@ async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> S
 async fn delete_note(pool: &DbPool, id: u32) -> Status {
     sqlx::query("UPDATE notes SET deleted = TRUE WHERE id = ?")
         .bind(id)
-        .execute(&***pool)
+        .execute(&**pool)
         .await
         .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
 }
@@ -214,6 +232,89 @@ async fn get_users_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>, username: 
     String::default()
 }
 
+#[get("/films")]
+async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<FilmData>> {
+    let mut state = state.lock().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    if now - state.last_hit_at < 5 * 60 {
+        return Json::from(state.last_response.clone());
+    }
+
+    let mut films = vec![];
+
+    if let Ok(req) = reqwest::get("https://letterboxd.com/14rovi/films/by/date/size/large/").await {
+        if let Ok(text) = req.text().await {
+            let document = Document::from(text.as_str());
+
+            for film_node in document.find(
+                Name("ul")
+                    .and(Class("poster-list"))
+                    .descendant(Class("poster-container")),
+            ) {
+                let (Some(name), Some(rating), Some(div_node), Some(watched_at)) = (
+                    film_node
+                        .find(Name("img"))
+                        .next()
+                        .and_then(|n| n.attr("alt"))
+                        .map(|s| s.to_string()),
+                    film_node
+                        .find(Name("span").and(Class("rating")))
+                        .next()
+                        .and_then(|n| n.attr("class"))
+                        .and_then(|c| c.split("-").last())
+                        .and_then(|r| r.parse().ok()),
+                    film_node.find(Attr("data-type", "film")).next(),
+                    film_node
+                        .find(Name("time"))
+                        .next()
+                        .and_then(|n| n.attr("datetime"))
+                        .map(|dt| dt.to_string()),
+                ) else {
+                    continue;
+                };
+
+                let (
+                    Some(film_id),
+                    Some(film_url_name),
+                    Some(film_poster_width),
+                    Some(film_poster_height),
+                ) = (
+                    div_node.attr("data-film-id"),
+                    div_node.attr("data-film-slug"),
+                    div_node.attr("data-image-width"),
+                    div_node.attr("data-image-height"),
+                )
+                else {
+                    continue;
+                };
+
+                films.push(FilmData {
+                    name,
+                    rating,
+                    watched_at,
+                    poster_url: format!(
+                        "https://a.ltrbxd.com/resized/film-poster/{}/{}-{}-0-{}-0-{}-crop.jpg",
+                        film_id.chars().join("/"),
+                        film_id,
+                        film_url_name,
+                        film_poster_width,
+                        film_poster_height
+                    ),
+                });
+            }
+        }
+    }
+
+    state.last_hit_at = now;
+    state.last_response = films.clone();
+
+    Json::from(films)
+}
+
 pub struct CORS;
 
 #[rocket::async_trait]
@@ -251,14 +352,18 @@ async fn rocket() -> Rocket<Build> {
 
     rocket::build()
         .attach(CORS)
-        .manage(Arc::new(pool))
+        .manage(pool)
         .manage(Arc::new(Mutex::new(LastFMAPI {
             key: env::var("LAST_FM_API_KEY")
                 .expect("Can't find LAST_FM_API_KEY")
                 .to_string(),
             user_cache: HashMap::default(),
         })))
-        .mount("/", routes![all_options])
+        .manage(Arc::new(Mutex::new(LetterboxdScrape {
+            last_hit_at: u64::default(),
+            last_response: Vec::default(),
+        })))
+        .mount("/", routes![all_options, get_films])
         .mount(
             "/notes",
             routes![
