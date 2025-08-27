@@ -249,11 +249,11 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
     if let Ok(req) = reqwest::get("https://letterboxd.com/14rovi/films/by/date/size/large/").await {
         if let Ok(text) = req.text().await {
             let document = Document::from(text.as_str());
-
+            // println!("{}", text.as_str());
             for film_node in document.find(
-                Name("ul")
-                    .and(Class("poster-list"))
-                    .descendant(Class("poster-container")),
+                Name("div")
+                    .and(Class("poster-grid"))
+                    .descendant(Name("li")),
             ) {
                 let (Some(name), Some(rating), Some(div_node), Some(watched_at)) = (
                     film_node
@@ -267,13 +267,14 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                         .and_then(|n| n.attr("class"))
                         .and_then(|c| c.split("-").last())
                         .and_then(|r| r.parse().ok()),
-                    film_node.find(Attr("data-type", "film")).next(),
+                    film_node.find(Attr("data-component-class", "globals.comps.LazyPoster")).next(),
                     film_node
                         .find(Name("time"))
                         .next()
                         .and_then(|n| n.attr("datetime"))
                         .map(|dt| dt.to_string()),
                 ) else {
+                    println!("{:?}", film_node);
                     continue;
                 };
 
@@ -284,11 +285,12 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                     Some(film_poster_height),
                 ) = (
                     div_node.attr("data-film-id"),
-                    div_node.attr("data-film-slug"),
+                    div_node.attr("data-item-slug"),
                     div_node.attr("data-image-width"),
                     div_node.attr("data-image-height"),
                 )
                 else {
+                    println!("{:?}", film_node);
                     continue;
                 };
 
