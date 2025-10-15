@@ -14,3 +14,4 @@ image = "0.25.2"
 sqlx = { version = "0.8.6", features = [ "runtime-tokio", "tls-native-tls", "sqlite", "macros" ] }
 select = "0.6.1"
 itertools = "0.14.0"
+serde_json = "1.0.145"

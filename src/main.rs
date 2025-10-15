@@ -8,7 +8,7 @@ use rocket::{
     delete,
     fairing::{Fairing, Info, Kind},
     fs::{NamedFile, TempFile},
-    futures::lock::Mutex,
+    futures::{future::join_all, lock::Mutex},
     get,
     http::{Header, Status},
     launch, options, patch, post,
@@ -22,6 +22,7 @@ use sqlx::{Pool, Sqlite, SqlitePool};
 
 use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
+use tokio::join;
 
 use std::{
     collections::HashMap,
@@ -43,12 +44,17 @@ struct StickyNote {
     y: i64,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 struct FilmData {
     name: String,
     poster_url: String,
     rating: u32,
     watched_at: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+struct LetterboxdPoster {
+    url: String,
 }
 
 struct LastFmApiHit {
@@ -263,7 +269,7 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                         .next()
                         .and_then(|n| n.attr("class"))
                         .and_then(|c| c.split("-").last())
-                        .and_then(|r| r.parse().ok()),
+                        .and_then(|r| r.parse::<u32>().ok()),
                     film_node
                         .find(Attr("data-component-class", "LazyPoster"))
                         .next(),
@@ -276,18 +282,25 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                     continue;
                 };
 
-                let (
-                    Some(film_id),
-                    Some(film_url_name),
-                    Some(film_poster_width),
-                    Some(film_poster_height),
-                ) = (
-                    div_node.attr("data-film-id"),
-                    div_node.attr("data-item-slug"),
-                    div_node.attr("data-image-width"),
-                    div_node.attr("data-image-height"),
-                )
-                else {
+                // https://letterboxd.com/ data-item-link poster/std/150
+                //
+
+                // let (
+                //     Some(film_id),
+                //     Some(film_url_name),
+                //     Some(film_poster_width),
+                //     Some(film_poster_height),
+                // ) = (
+                //     div_node.attr("data-film-id"),
+                //     div_node.attr("data-item-slug"),
+                //     div_node.attr("data-image-width"),
+                //     div_node.attr("data-image-height"),
+                // )
+                // else {
+                //     continue;
+                // };
+
+                let Some(data_item_link) = div_node.attr("data-item-link") else {
                     continue;
                 };
 
@@ -295,18 +308,42 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                     name,
                     rating,
                     watched_at,
-                    poster_url: format!(
-                        "https://a.ltrbxd.com/resized/film-poster/{}/{}-{}-0-{}-0-{}-crop.jpg",
-                        film_id.chars().join("/"),
-                        film_id,
-                        film_url_name,
-                        film_poster_width,
-                        film_poster_height
-                    ),
+                    // poster_url: format!(
+                    //     "https://a.ltrbxd.com/resized/film-poster/{}/{}-{}-0-{}-0-{}-crop.jpg",
+                    //     film_id.chars().join("/"),
+                    //     film_id,
+                    //     film_url_name,
+                    //     film_poster_width,
+                    //     film_poster_height
+                    // ),
+                    poster_url: data_item_link.to_string(),
                 });
             }
         }
     }
+
+    async fn set_poster_url(film: &mut FilmData) {
+        if let Ok(req) = reqwest::get(format!(
+            "https://letterboxd.com{}poster/std/150",
+            film.poster_url
+        ))
+        .await
+        {
+            if let Ok(text) = req.text().await {
+                let poster: LetterboxdPoster = serde_json::from_str(&text).unwrap();
+                println!("{}", poster.url);
+                film.poster_url = poster.url;
+            }
+        }
+    }
+
+    let mut futures = vec![];
+
+    for film in films.iter_mut() {
+        futures.push(set_poster_url(film));
+    }
+
+    join_all(futures).await;
 
     state.last_hit_at = now;
     state.last_response = films.clone();
