@@ -1,7 +1,5 @@
 use dotenvy::dotenv;
 
-use itertools::Itertools;
-
 use image::{EncodableLayout, ImageReader};
 
 use rocket::{
@@ -22,7 +20,6 @@ use sqlx::{Pool, Sqlite, SqlitePool};
 
 use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
-use tokio::join;
 
 use std::{
     collections::HashMap,
@@ -282,24 +279,6 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                     continue;
                 };
 
-                // https://letterboxd.com/ data-item-link poster/std/150
-                //
-
-                // let (
-                //     Some(film_id),
-                //     Some(film_url_name),
-                //     Some(film_poster_width),
-                //     Some(film_poster_height),
-                // ) = (
-                //     div_node.attr("data-film-id"),
-                //     div_node.attr("data-item-slug"),
-                //     div_node.attr("data-image-width"),
-                //     div_node.attr("data-image-height"),
-                // )
-                // else {
-                //     continue;
-                // };
-
                 let Some(data_item_link) = div_node.attr("data-item-link") else {
                     continue;
                 };
@@ -308,40 +287,16 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
                     name,
                     rating,
                     watched_at,
-                    // poster_url: format!(
-                    //     "https://a.ltrbxd.com/resized/film-poster/{}/{}-{}-0-{}-0-{}-crop.jpg",
-                    //     film_id.chars().join("/"),
-                    //     film_id,
-                    //     film_url_name,
-                    //     film_poster_width,
-                    //     film_poster_height
-                    // ),
                     poster_url: data_item_link.to_string(),
                 });
             }
         }
     }
 
-    async fn set_poster_url(film: &mut FilmData) {
-        if let Ok(req) = reqwest::get(format!(
-            "https://letterboxd.com{}poster/std/150",
-            film.poster_url
-        ))
-        .await
-        {
-            if let Ok(text) = req.text().await {
-                let poster: LetterboxdPoster = serde_json::from_str(&text).unwrap();
-                println!("{}", poster.url);
-                film.poster_url = poster.url;
-            }
-        }
-    }
-
-    let mut futures = vec![];
-
-    for film in films.iter_mut() {
-        futures.push(set_poster_url(film));
-    }
+    let futures = films
+        .iter_mut()
+        .map(|film| set_poster_url(film))
+        .collect::<Vec<_>>();
 
     join_all(futures).await;
 
@@ -349,6 +304,21 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
     state.last_response = films.clone();
 
     Json::from(films)
+}
+
+async fn set_poster_url(film: &mut FilmData) {
+    if let Ok(req) = reqwest::get(format!(
+        "https://letterboxd.com{}poster/std/150",
+        film.poster_url
+    ))
+    .await
+    {
+        if let Ok(text) = req.text().await {
+            let poster: LetterboxdPoster = serde_json::from_str(&text).unwrap();
+            println!("{}", poster.url);
+            film.poster_url = poster.url;
+        }
+    }
 }
 
 pub struct CORS;
