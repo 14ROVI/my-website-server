@@ -1,18 +1,17 @@
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocket::futures::future::join_all;
-use rocket::futures::lock::Mutex;
-use rocket::serde::json::Json;
-use rocket::{get, routes, Route, State};
+use actix_web::web::{Data, Json};
+use actix_web::{get, web};
 
+use futures::future::join_all;
 use select::predicate::{Attr, Class, Name, Predicate};
 use select::{document::Document, node::Node};
+use tokio::sync::Mutex;
 
 use super::model::{FilmData, LetterboxdPoster, LetterboxdScrape};
 
 #[get("/")]
-async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<FilmData>> {
+async fn get_films(state: Data<Mutex<LetterboxdScrape>>) -> Json<Vec<FilmData>> {
     let mut state = state.lock().await;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -20,7 +19,7 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
         .as_secs();
 
     if now - state.last_hit_at < 5 * 60 {
-        return Json::from(state.last_response.clone());
+        return Json(state.last_response.clone());
     }
 
     let films = get_letterboxd_films().await.unwrap_or_default();
@@ -28,7 +27,7 @@ async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<Film
     state.last_hit_at = now;
     state.last_response = films.clone();
 
-    Json::from(films)
+    Json(films)
 }
 
 async fn get_letterboxd_films() -> Result<Vec<FilmData>, Box<dyn std::error::Error>> {
@@ -44,9 +43,9 @@ async fn get_letterboxd_films() -> Result<Vec<FilmData>, Box<dyn std::error::Err
             .collect::<Vec<_>>()
     };
 
-    let futures = films.iter_mut().map(|film| set_poster_url(film));
+    let handles = films.iter_mut().map(|film| set_poster_url(film));
 
-    join_all(futures).await;
+    join_all(handles).await;
 
     return Ok(films);
 }
@@ -99,6 +98,10 @@ async fn set_poster_url(film: &mut FilmData) {
     }
 }
 
-pub fn routes() -> Vec<Route> {
-    routes![get_films]
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.app_data(Data::new(Mutex::new(LetterboxdScrape {
+        last_hit_at: u64::default(),
+        last_response: Vec::default(),
+    })))
+    .service(get_films);
 }

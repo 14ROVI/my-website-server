@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocket::{
-    delete, get, http::Status, patch, post, response::status, routes, serde::json::Json, Route,
+use actix_web::{
+    delete, get, patch, post,
+    web::{self, Json},
+    HttpResponse, Responder,
 };
 
 use crate::{notes::model::StickyNote, DbPool};
@@ -14,7 +16,7 @@ fn get_sys_time() -> Option<u32> {
 }
 
 #[get("/")]
-async fn get_active_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
+async fn get_active_notes(pool: DbPool) -> Json<Vec<StickyNote>> {
     sqlx::query_as!(
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE deleted = FALSE"
@@ -25,7 +27,7 @@ async fn get_active_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
 }
 
 #[get("/deleted")]
-async fn get_deleted_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
+async fn get_deleted_notes(pool: DbPool) -> Json<Vec<StickyNote>> {
     sqlx::query_as!(
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE deleted = TRUE"
@@ -35,8 +37,10 @@ async fn get_deleted_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
     .map_or_else(|_| Json(Vec::new()), Json)
 }
 
-#[get("/<id>")]
-async fn get_note(pool: &DbPool, id: u32) -> Option<Json<StickyNote>> {
+#[get("/{id}")]
+async fn get_note(pool: DbPool, path: web::Path<u32>) -> Option<Json<StickyNote>> {
+    let id = path.into_inner();
+
     sqlx::query_as!(
         StickyNote,
         "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
@@ -48,13 +52,9 @@ async fn get_note(pool: &DbPool, id: u32) -> Option<Json<StickyNote>> {
     .map(Json)
 }
 
-#[post("/?<content>&<x>&<y>")]
-async fn create_note(
-    pool: &DbPool,
-    content: &str,
-    x: u32,
-    y: u32,
-) -> Result<Json<StickyNote>, status::Custom<&'static str>> {
+#[post("/?{content}&{x}&{y}")]
+async fn create_note(pool: DbPool, query: web::Query<(String, u32, u32)>) -> impl Responder {
+    let (content, x, y) = query.into_inner();
     let sys_time = get_sys_time();
 
     if let Some(sys_time) = sys_time {
@@ -69,18 +69,19 @@ async fn create_note(
         )
         .fetch_one(&**pool)
         .await
-        .map(Json)
-        .map_err(|_| status::Custom(Status::InternalServerError, "error saving sticky note"))
+        .map_or_else(
+            |_| HttpResponse::InternalServerError().body("Error saving sticky note."),
+            |note| HttpResponse::Ok().json(note),
+        )
     } else {
-        Err(status::Custom(
-            Status::InternalServerError,
-            "error getting system time",
-        ))
+        HttpResponse::InternalServerError().body("Error getting system time.")
     }
 }
 
-#[patch("/<id>?<content>&<x>&<y>")]
-async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> Status {
+#[patch("/{id}?{content}&{x}&{y}")]
+async fn update_note(pool: DbPool, path: web::Path<(u32, String, u32, u32)>) -> impl Responder {
+    let (id, content, x, y) = path.into_inner();
+
     sqlx::query("UPDATE notes SET content = ?, x = ?, y = ? WHERE id = ?")
         .bind(content)
         .bind(x)
@@ -88,25 +89,31 @@ async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> S
         .bind(id)
         .execute(&**pool)
         .await
-        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
+        .map_or_else(
+            |_| HttpResponse::InternalServerError(),
+            |_| HttpResponse::Ok(),
+        )
 }
 
-#[delete("/<id>")]
-async fn delete_note(pool: &DbPool, id: u32) -> Status {
+#[delete("/{id}")]
+async fn delete_note(pool: DbPool, path: web::Path<u32>) -> impl Responder {
+    let id = path.into_inner();
+
     sqlx::query("UPDATE notes SET deleted = TRUE WHERE id = ?")
         .bind(id)
         .execute(&**pool)
         .await
-        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
+        .map_or_else(
+            |_| HttpResponse::InternalServerError(),
+            |_| HttpResponse::Ok(),
+        )
 }
 
-pub fn routes() -> Vec<Route> {
-    routes![
-        get_active_notes,
-        get_deleted_notes,
-        get_note,
-        create_note,
-        update_note,
-        delete_note
-    ]
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.service(get_active_notes)
+        .service(get_deleted_notes)
+        .service(get_note)
+        .service(create_note)
+        .service(update_note)
+        .service(delete_note);
 }

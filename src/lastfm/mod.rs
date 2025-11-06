@@ -1,5 +1,4 @@
 mod model;
 mod routes;
 
-pub use model::LastFMAPI;
-pub use routes::routes;
+pub use routes::config;
