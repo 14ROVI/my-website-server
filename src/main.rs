@@ -1,167 +1,23 @@
+mod cors;
+mod lastfm;
+mod letterboxd;
+mod notes;
+
 use dotenvy::dotenv;
-
 use image::{EncodableLayout, ImageReader};
-
 use rocket::{
-    delete,
-    fairing::{Fairing, Info, Kind},
     fs::{NamedFile, TempFile},
-    futures::{future::join_all, lock::Mutex},
+    futures::lock::Mutex,
     get,
-    http::{Header, Status},
-    launch, options, patch, post,
-    response::{status, Redirect},
-    routes,
-    serde::{json::Json, Deserialize, Serialize},
-    uri, Build, Request, Response, Rocket, State,
+    http::Status,
+    launch, patch, routes, Build, Rocket, State,
 };
-
 use sqlx::{Pool, Sqlite, SqlitePool};
+use std::{collections::HashMap, env, io::Cursor, path::Path, sync::Arc};
 
-use select::predicate::{Attr, Class, Name, Predicate};
-use select::{document::Document, node::Node};
-
-use std::{
-    collections::HashMap,
-    env,
-    io::Cursor,
-    path::Path,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use crate::{lastfm::LastFMAPI, letterboxd::LetterboxdScrape};
 
 type DbPool = State<Pool<Sqlite>>;
-
-#[derive(Deserialize, Serialize)]
-struct StickyNote {
-    id: i64,
-    content: String,
-    created_at: i64,
-    x: i64,
-    y: i64,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-struct FilmData {
-    name: String,
-    poster_url: String,
-    rating: u32,
-    watched_at: String,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-struct LetterboxdPoster {
-    url: String,
-}
-
-struct LastFmApiHit {
-    hit_at: u64,
-    data: String,
-}
-
-struct LastFMAPI {
-    key: String,
-    user_cache: HashMap<String, LastFmApiHit>,
-}
-
-struct LetterboxdScrape {
-    last_hit_at: u64,
-    last_response: Vec<FilmData>,
-}
-
-fn get_sys_time() -> Option<u32> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|t| u32::try_from(t.as_secs()).ok())
-}
-
-#[get("/")]
-async fn get_active_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
-    sqlx::query_as!(
-        StickyNote,
-        "SELECT id, content, created_at, x, y FROM notes WHERE deleted = FALSE"
-    )
-    .fetch_all(&**pool)
-    .await
-    .map_or_else(|_| Json(Vec::new()), Json)
-}
-
-#[get("/deleted")]
-async fn get_deleted_notes(pool: &DbPool) -> Json<Vec<StickyNote>> {
-    sqlx::query_as!(
-        StickyNote,
-        "SELECT id, content, created_at, x, y FROM notes WHERE deleted = TRUE"
-    )
-    .fetch_all(&**pool)
-    .await
-    .map_or_else(|_| Json(Vec::new()), Json)
-}
-
-#[get("/<id>")]
-async fn get_note(pool: &DbPool, id: u32) -> Option<Json<StickyNote>> {
-    sqlx::query_as!(
-        StickyNote,
-        "SELECT id, content, created_at, x, y FROM notes WHERE id = ?",
-        id
-    )
-    .fetch_one(&**pool)
-    .await
-    .ok()
-    .map(Json)
-}
-
-#[post("/?<content>&<x>&<y>")]
-async fn create_note(
-    pool: &DbPool,
-    content: &str,
-    x: u32,
-    y: u32,
-) -> Result<Json<StickyNote>, status::Custom<&'static str>> {
-    let sys_time = get_sys_time();
-
-    if let Some(sys_time) = sys_time {
-        sqlx::query_as!(
-            StickyNote,
-            "INSERT INTO notes (content, created_at, x, y) VALUES (?, ?, ?, ?)
-            RETURNING id, content, created_at, x, y",
-            content,
-            sys_time,
-            x,
-            y
-        )
-        .fetch_one(&**pool)
-        .await
-        .map(Json)
-        .map_err(|_| status::Custom(Status::InternalServerError, "error saving sticky note"))
-    } else {
-        Err(status::Custom(
-            Status::InternalServerError,
-            "error getting system time",
-        ))
-    }
-}
-
-#[patch("/<id>?<content>&<x>&<y>")]
-async fn update_note(pool: &DbPool, id: u32, content: &str, x: u32, y: u32) -> Status {
-    sqlx::query("UPDATE notes SET content = ?, x = ?, y = ? WHERE id = ?")
-        .bind(content)
-        .bind(x)
-        .bind(y)
-        .bind(id)
-        .execute(&**pool)
-        .await
-        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
-}
-
-#[delete("/<id>")]
-async fn delete_note(pool: &DbPool, id: u32) -> Status {
-    sqlx::query("UPDATE notes SET deleted = TRUE WHERE id = ?")
-        .bind(id)
-        .execute(&**pool)
-        .await
-        .map_or_else(|_| Status::InternalServerError, |_| Status::Ok)
-}
 
 #[get("/")]
 async fn get_paint() -> Option<NamedFile> {
@@ -193,164 +49,6 @@ async fn update_paint(upload: TempFile<'_>) -> Status {
     }
 }
 
-#[get("/")]
-async fn get_recent_songs() -> Redirect {
-    Redirect::to(uri!("./I4ROVI"))
-}
-
-#[get("/<username>")]
-async fn get_users_recent_songs(state: &State<Arc<Mutex<LastFMAPI>>>, username: &str) -> String {
-    let mut state = state.lock().await;
-    let last_hit = state.user_cache.get(username);
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
-
-    if let Some(last_hit) = last_hit {
-        if now - last_hit.hit_at < 5 {
-            return last_hit.data.clone();
-        }
-    }
-
-    let url = format!(
-        "http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user={}&api_key={}&format=json",
-        username, &state.key
-    );
-
-    if let Ok(req) = reqwest::get(url).await {
-        if let Ok(text) = req.text().await {
-            state.user_cache.insert(
-                username.to_owned(),
-                LastFmApiHit {
-                    hit_at: now,
-                    data: text.clone(),
-                },
-            );
-            return text;
-        }
-    }
-
-    String::default()
-}
-
-#[get("/films")]
-async fn get_films(state: &State<Arc<Mutex<LetterboxdScrape>>>) -> Json<Vec<FilmData>> {
-    let mut state = state.lock().await;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
-
-    if now - state.last_hit_at < 5 * 60 {
-        return Json::from(state.last_response.clone());
-    }
-
-    let films = get_letterboxd_films().await.unwrap_or_default();
-
-    state.last_hit_at = now;
-    state.last_response = films.clone();
-
-    Json::from(films)
-}
-
-async fn get_letterboxd_films() -> Result<Vec<FilmData>, Box<dyn std::error::Error>> {
-    let mut films = {
-        let html = reqwest::get("https://letterboxd.com/14rovi/films/by/date/size/large/")
-            .await?
-            .text()
-            .await?;
-
-        Document::from(html.as_str())
-            .find(Name("div").and(Class("poster-grid")).descendant(Name("li")))
-            .flat_map(parse_letterboxd_poster)
-            .collect::<Vec<_>>()
-    };
-
-    let futures = films.iter_mut().map(|film| set_poster_url(film));
-
-    join_all(futures).await;
-
-    return Ok(films);
-}
-
-fn parse_letterboxd_poster(film_node: Node) -> Option<FilmData> {
-    let name = film_node
-        .find(Name("img"))
-        .next()
-        .and_then(|n| n.attr("alt"))
-        .map(|s| s.to_string())?;
-
-    let rating = film_node
-        .find(Name("span").and(Class("rating")))
-        .next()
-        .and_then(|n| n.attr("class"))
-        .and_then(|c| c.split("-").last())
-        .and_then(|r| r.parse::<u32>().ok())?;
-
-    let watched_at = film_node
-        .find(Name("time"))
-        .next()
-        .and_then(|n| n.attr("datetime"))
-        .map(|dt| dt.to_string())?;
-
-    let poster_url = film_node
-        .find(Attr("data-component-class", "LazyPoster"))
-        .next()
-        .and_then(|n| n.attr("data-item-link"))
-        .map(|s| s.to_string())?;
-
-    Some(FilmData {
-        name,
-        rating,
-        watched_at,
-        poster_url,
-    })
-}
-
-async fn set_poster_url(film: &mut FilmData) {
-    if let Ok(req) = reqwest::get(format!(
-        "https://letterboxd.com{}poster/std/150",
-        film.poster_url
-    ))
-    .await
-    {
-        if let Ok(text) = req.text().await {
-            let poster: LetterboxdPoster = serde_json::from_str(&text).unwrap();
-            println!("{}", poster.url);
-            film.poster_url = poster.url;
-        }
-    }
-}
-
-pub struct CORS;
-
-#[rocket::async_trait]
-impl Fairing for CORS {
-    fn info(&self) -> Info {
-        Info {
-            name: "Add CORS headers to responses",
-            kind: Kind::Response,
-        }
-    }
-
-    async fn on_response<'r>(&self, _request: &'r Request<'_>, response: &mut Response<'r>) {
-        response.set_header(Header::new("Access-Control-Allow-Origin", "*"));
-        response.set_header(Header::new(
-            "Access-Control-Allow-Methods",
-            "POST, GET, PATCH, DELETE, OPTIONS",
-        ));
-        response.set_header(Header::new("Access-Control-Allow-Headers", "*"));
-        response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
-    }
-}
-
-#[options("/<_..>")]
-fn all_options() {
-    /* Intentionally left empty */
-}
-
 #[launch]
 async fn rocket() -> Rocket<Build> {
     dotenv().expect("Couldn't load .env");
@@ -360,7 +58,7 @@ async fn rocket() -> Rocket<Build> {
         .unwrap();
 
     rocket::build()
-        .attach(CORS)
+        .attach(cors::CORS)
         .manage(pool)
         .manage(Arc::new(Mutex::new(LastFMAPI {
             key: env::var("LAST_FM_API_KEY")
@@ -372,18 +70,9 @@ async fn rocket() -> Rocket<Build> {
             last_hit_at: u64::default(),
             last_response: Vec::default(),
         })))
-        .mount("/", routes![all_options, get_films])
-        .mount(
-            "/notes",
-            routes![
-                get_active_notes,
-                get_deleted_notes,
-                get_note,
-                create_note,
-                update_note,
-                delete_note
-            ],
-        )
+        .mount("/", cors::routes())
+        .mount("/films", letterboxd::routes())
+        .mount("/notes", notes::routes())
         .mount("/paint", routes![get_paint, update_paint])
-        .mount("/lastfm", routes![get_recent_songs, get_users_recent_songs])
+        .mount("/lastfm", lastfm::routes())
 }
