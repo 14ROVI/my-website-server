@@ -12,8 +12,3 @@ pub struct FilmData {
     pub rating: u32,
     pub watched_at: String,
 }
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct LetterboxdPoster {
-    pub url: String,
-}
