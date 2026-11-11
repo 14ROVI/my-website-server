@@ -37,7 +37,7 @@ async fn main() -> std::io::Result<()> {
     return HttpServer::new(move || {
         let cors = Cors::default()
             .allowed_origin("https://rovi.me")
-            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+            .allowed_methods(vec!["GET", "POST", "PATCH", "DELETE", "OPTIONS"])
             .allowed_headers(vec![
                 http::header::AUTHORIZATION,
                 http::header::ACCEPT,

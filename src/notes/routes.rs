@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
+
 use actix_web::{
     delete, get, patch, post,
     web::{self, Json},
@@ -52,9 +54,16 @@ async fn get_note(pool: DbPool, path: web::Path<u32>) -> Option<Json<StickyNote>
     .map(Json)
 }
 
-#[post("/?{content}&{x}&{y}")]
-async fn create_note(pool: DbPool, query: web::Query<(String, u32, u32)>) -> impl Responder {
-    let (content, x, y) = query.into_inner();
+#[derive(Deserialize)]
+struct NoteFields {
+    content: String,
+    x: i32,
+    y: i32,
+}
+
+#[post("/")]
+async fn create_note(pool: DbPool, query: web::Query<NoteFields>) -> impl Responder {
+    let NoteFields { content, x, y } = query.into_inner();
     let sys_time = get_sys_time();
 
     if let Some(sys_time) = sys_time {
@@ -78,9 +87,14 @@ async fn create_note(pool: DbPool, query: web::Query<(String, u32, u32)>) -> imp
     }
 }
 
-#[patch("/{id}?{content}&{x}&{y}")]
-async fn update_note(pool: DbPool, path: web::Path<(u32, String, u32, u32)>) -> impl Responder {
-    let (id, content, x, y) = path.into_inner();
+#[patch("/{id}")]
+async fn update_note(
+    pool: DbPool,
+    path: web::Path<u32>,
+    query: web::Query<NoteFields>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let NoteFields { content, x, y } = query.into_inner();
 
     sqlx::query("UPDATE notes SET content = ?, x = ?, y = ? WHERE id = ?")
         .bind(content)
