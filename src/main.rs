@@ -22,6 +22,11 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap();
 
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .map_err(std::io::Error::other)?;
+
     return HttpServer::new(move || {
         let cors = Cors::default()
             .allowed_origin("https://rovi.me")
