@@ -1,6 +1,7 @@
 mod lastfm;
 mod letterboxd;
 mod notes;
+mod paint;
 
 use actix_cors::Cors;
 use actix_web::{
@@ -27,6 +28,12 @@ async fn main() -> std::io::Result<()> {
         .await
         .map_err(std::io::Error::other)?;
 
+    let paint = Data::new(
+        paint::PaintState::load(pool.clone())
+            .await
+            .map_err(std::io::Error::other)?,
+    );
+
     return HttpServer::new(move || {
         let cors = Cors::default()
             .allowed_origin("https://rovi.me")
@@ -41,9 +48,11 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .app_data(Data::new(pool.clone()))
+            .app_data(paint.clone())
             .service(web::scope("/notes").configure(notes::config))
             .service(web::scope("/films").configure(letterboxd::config))
             .service(web::scope("/lastfm").configure(lastfm::config))
+            .service(web::scope("/paint").configure(paint::config))
     })
     .bind(("127.0.0.1", 2323))?
     .run()
